@@ -16,6 +16,7 @@ git push tag v1.2.3
        GitHub App token, 1h, this repo only
        repository_dispatch app-released  ---->  Publish
                                                   resolve + validate tag
+                                                  cnspec policy gate on the built image
                                                   smoke test (kind)
                                                   verify P1 signature, build amd64+arm64
                                                   push, sign, SBOM + provenance
@@ -74,8 +75,8 @@ docker buildx imagetools inspect clickbg/hello-mondoo:0.1.0 --format '{{json .Pr
 
 | Workflow | Trigger | What it does |
 | --- | --- | --- |
-| `ci.yml` | PR, push to main | hadolint, shellcheck, kubeconform (strict, k8s 1.37), then the smoke test for the tag currently in the manifest. |
-| `smoke-test.yml` | called by CI and Publish | Fetches and verifies a release, builds the image, loads it into kind, applies `k8s/` with only the image swapped, waits for rollout and checks the response. |
+| `ci.yml` | PR, push to main | hadolint, shellcheck, kubeconform (strict, k8s 1.37), cnspec on the Dockerfile and `k8s/` (SARIF to code scanning), then the smoke test for the tag currently in the manifest. |
+| `smoke-test.yml` | called by CI and Publish | Fetches and verifies a release, builds the image, runs cnspec against it, loads it into kind, applies `k8s/` with only the image swapped, waits for rollout and checks the response. |
 | `publish.yml` | `repository_dispatch: app-released`, or manual with a tag | Smoke test, then build, push and sign, then bump the manifest. |
 
 Rebuild any release by hand:
@@ -91,12 +92,68 @@ make run                    # fetch + verify, build for this machine, run on :80
 make run PORT=9090          # different port
 make build TAG=v0.1.0-rc.1  # another release
 make build ARCH=amd64       # force an architecture
+make scan                   # cnspec: Dockerfile, built image and k8s/, same gate as CI
 make clean
 ```
 
 `TAG` defaults to the release the manifest deploys. `ARCH` defaults to the Docker engine's architecture, so Apple Silicon builds arm64 and x86 Linux builds amd64, and the image always runs natively. Releases are downloaded and verified once per tag.
 
-Needs Docker with buildx, `curl`, `cosign`, and `sha256sum` or `shasum`.
+Needs Docker with buildx, `curl`, `cosign`, and `sha256sum` or `shasum`. `make scan` also needs cnspec 14.4.0 with the `os@14.18.1` and `k8s@14.1.2` providers (see `.github/actions/setup-cnspec`).
+
+## Policy checks with cnspec
+
+The policy is `policies/hello-mondoo.mql.yaml`: one bundle, three groups, each scoped to one kind of asset so the same file serves every scan.
+
+| Group | Scanned as | Checks |
+| --- | --- | --- |
+| Dockerfile | `cnspec scan docker file Dockerfile` | **COPY to `/usr/local/bin/hello-mondoo` and ENTRYPOINT runs it**, **EXPOSE 8080/tcp**, non-root USER, base pinned by digest |
+| Built image | `cnspec scan docker container <id>` | **binary exists, is a file, executable by others**, **image config exposes 8080/tcp**, exec-form entrypoint, non-root user, binary not writable |
+| Manifests | `cnspec scan k8s k8s/ --discover clusters` | `HTTP_PORT`, `containerPort` and port name agree, restricted Pod Security Standard, namespace enforces restricted, image pinned by digest |
+
+Bold checks are the two the brief requires (impact 100). The rest are hardening (impact 70). Both block.
+
+### Where it runs, and why there
+
+- **On the built image, inside the smoke test, before anything is pushed.** This is the check that matters. It looks at the artifact, not the recipe, so it catches things a Dockerfile scan can't: a `.dockerignore` that drops the binary, a wrong `--chmod`, an EXPOSE lost in a refactor. The smoke test runs in CI on every change and in Publish before the push, so an image that fails the policy never reaches Docker Hub.
+- **On the Dockerfile and `k8s/`, statically, in CI.** Seconds, no build, and findings show up as code scanning annotations on the PR. It also catches drift between the manifest and the image, for example someone changing `containerPort` but not `HTTP_PORT`.
+- **Not in the app repo.** It produces binaries, not containers, and its binary is already covered by tests and the smoke test. Adding cnspec there would be for show.
+- **Not after the push.** By then the image is public and the signature is on it.
+
+### What happens on failure
+
+The job fails and the pipeline stops. In Publish that means no push, no signature, no manifest bump. Findings are in the job log, as code scanning alerts for the Dockerfile and manifests, and as a SARIF artifact for the image scan (30 days), so every release keeps a record of what was checked before it shipped.
+
+`scripts/cnspec-scan.sh` is the gate, used by CI, the smoke test and `make scan`. Two cnspec defaults made it necessary:
+
+- `--risk-threshold` defaults to 101, so `cnspec scan` never fails a pipeline unless told to.
+- A check that errors does not lower the score. In a test run, three checks errored and the asset still scored `LOW (0)`.
+
+So the script also reads a JUnit report and fails on any failed, errored or skipped check, and on zero checks. The last one matters: a group filter that matches nothing would otherwise pass with nothing checked.
+
+### What I found getting the image checks to work
+
+The required checks need both the image's filesystem (the binary) and its config (exposed ports), and cnspec sees different things depending on how the image is scanned:
+
+| Scan target | Filesystem | Image config |
+| --- | --- | --- |
+| `docker image` | yes | no, scanned as an exported tarball, which won't query the Docker engine |
+| running container | no, file checks need `stat` and distroless has no shell | yes |
+| created, never started container | yes, read from a `docker export` snapshot | yes |
+
+So the smoke test runs `docker create`, scans the container and removes it. Nothing executes during the scan.
+
+GitHub code scanning also rejected cnspec's SARIF at first: cnspec writes a result for every check, passing ones included, and checks that fail because something is missing have no source line to point at, only a logical location. The scan script drops passing results and anchors the rest to the scanned file before upload.
+
+### Versions
+
+cnspec 14.4.0 is pinned with a checksum, and the providers separately (`os@14.18.1`, `k8s@14.1.2`), since provider versions don't follow cnspec's. 14.4.0 was a day old when I pinned it, which breaks the 7 day cooldown used everywhere else. `docker.image.exposedPorts` first appears in `os` 14.18.1, so there was no older release that could do the image config check. Mondoo's own `docker-image` action wasn't used: it runs a floating `mondoo/cnspec:13` image and can't load a custom policy.
+
+### Where else cnspec could help
+
+- **The live cluster.** The smoke test already has a kind cluster with the app running. `cnspec scan k8s` against it would check what the API server actually admitted, not just what the YAML says.
+- **Signed images only.** A cnspec check that every container image in the namespace is pinned by digest, alongside a Sigstore admission policy that only allows images signed by `publish.yml`.
+- **The repos themselves.** `cnspec scan github repo` can check branch protection, tag rules, required reviews and Actions permissions on both repos. Those settings are part of the supply chain but live outside the code, which is why the READMEs have to list them by hand.
+- **Published images over time.** A weekly scheduled scan of `latest` on Docker Hub, reported to Mondoo Platform with a service account, would pick up new CVEs in the base image between releases.
 
 ## Setup outside the code
 
@@ -139,6 +196,7 @@ This repo:
 ## Not done, and what I'd add next
 
 - PodDisruptionBudget, NetworkPolicy and an HPA. Left out to keep the manifests minimal.
+- The cnspec ideas above, starting with the live cluster scan, since the cluster already exists in the smoke test.
 - Enforcing the image signature in the cluster with an admission controller (Sigstore policy-controller or Kyverno), so only images signed by `publish.yml` can run.
 - A PR-based manifest bump once `main` is protected.
 
