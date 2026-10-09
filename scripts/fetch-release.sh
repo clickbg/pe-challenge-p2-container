@@ -4,7 +4,7 @@
 #
 #   scripts/fetch-release.sh v1.2.3 [dist-dir]
 #
-# Needs: curl, cosign, sha256sum.
+# Needs: curl, cosign, and sha256sum or shasum (macOS).
 set -euo pipefail
 
 TAG="${1:?usage: $0 <tag> [dist-dir]}"
@@ -48,4 +48,8 @@ if [[ $(wc -l < SHA256SUMS.linux) -ne ${#binaries[@]} ]]; then
   echo "error: SHA256SUMS does not list every expected binary" >&2
   exit 1
 fi
-sha256sum -c SHA256SUMS.linux
+if command -v sha256sum >/dev/null; then
+  sha256sum -c SHA256SUMS.linux
+else
+  shasum -a 256 -c SHA256SUMS.linux
+fi

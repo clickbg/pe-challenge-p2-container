@@ -87,12 +87,16 @@ gh workflow run publish.yml -R clickbg/pe-challenge-p2-container -f tag=v0.1.0
 ## Local build
 
 ```
-scripts/fetch-release.sh v0.1.0       # download + cosign + sha256 check into ./dist
-docker buildx build --platform linux/amd64 -t hello-mondoo:local --load .
-docker run --rm -p 8080:8080 hello-mondoo:local
+make run                    # fetch + verify, build for this machine, run on :8080
+make run PORT=9090          # different port
+make build TAG=v0.1.0-rc.1  # another release
+make build ARCH=amd64       # force an architecture
+make clean
 ```
 
-Needs `curl`, `cosign` and `sha256sum`.
+`TAG` defaults to the release the manifest deploys. `ARCH` defaults to the Docker engine's architecture, so Apple Silicon builds arm64 and x86 Linux builds amd64, and the image always runs natively. Releases are downloaded and verified once per tag.
+
+Needs Docker with buildx, `curl`, `cosign`, and `sha256sum` or `shasum`.
 
 ## Setup outside the code
 
