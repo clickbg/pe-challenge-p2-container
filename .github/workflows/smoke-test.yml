@@ -51,6 +51,7 @@ jobs:
       - name: Scan image (cnspec)
         env:
           SARIF_OUT: cnspec-container.sarif
+          SARIF_FILE: Dockerfile
         run: |
           cid=$(docker create "$LOCAL_IMAGE")
           trap 'docker rm "$cid" >/dev/null' EXIT

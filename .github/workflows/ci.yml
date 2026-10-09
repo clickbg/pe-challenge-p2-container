@@ -67,6 +67,7 @@ jobs:
         id: dockerfile
         env:
           SARIF_OUT: cnspec-dockerfile.sarif
+          SARIF_FILE: Dockerfile
         run: bash scripts/cnspec-scan.sh docker file Dockerfile
 
       - name: Scan k8s manifests
@@ -74,6 +75,7 @@ jobs:
         if: success() || steps.dockerfile.conclusion == 'failure'
         env:
           SARIF_OUT: cnspec-k8s.sarif
+          SARIF_FILE: k8s/10-deployment.yaml
         run: bash scripts/cnspec-scan.sh k8s k8s/ --discover clusters
 
       - name: Upload Dockerfile findings

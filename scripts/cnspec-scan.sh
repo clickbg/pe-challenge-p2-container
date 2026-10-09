@@ -42,8 +42,27 @@ if [[ "$tests" -eq 0 || "$failures" -gt 0 || "$skipped" -gt 0 ]]; then
 fi
 
 # 3. Optional SARIF for code scanning. Report only, the gate is above.
+#    GitHub needs a file location on every result, but cnspec emits passing
+#    checks, and checks that fail because something is missing (no EXPOSE),
+#    with only a logical location. So drop passes and anchor the rest to
+#    SARIF_FILE, the repo file that was scanned.
 if [[ -n "${SARIF_OUT:-}" ]]; then
-  cnspec scan "$@" "${common[@]}" --output sarif --output-target "$SARIF_OUT" || true
+  : "${SARIF_FILE:?SARIF_FILE must name the scanned file when SARIF_OUT is set}"
+  raw=$(mktemp)
+  cnspec scan "$@" "${common[@]}" --output sarif --output-target "$raw" || true
+  jq --arg uri "$SARIF_FILE" '
+    .runs[].results |= map(
+      select(.kind != "pass")
+      | if any(.locations[]?; .physicalLocation != null) then .
+        else .locations = ((.locations // [] | if length == 0 then [{}] else . end)
+               | .[0].physicalLocation = {
+                   artifactLocation: {uri: $uri},
+                   region: {startLine: 1}
+                 })
+        end
+    )' "$raw" > "$SARIF_OUT"
+  rm -f "$raw"
+  echo "SARIF: $(jq '[.runs[].results[]] | length' "$SARIF_OUT") finding(s) written to $SARIF_OUT"
 fi
 
 exit "$status"
