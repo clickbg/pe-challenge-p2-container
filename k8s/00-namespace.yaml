@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: hello-mondoo
+  labels:
+    app.kubernetes.io/name: hello-mondoo
+    # Reject any pod in this namespace that doesn't meet the "restricted"
+    # Pod Security Standard.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest

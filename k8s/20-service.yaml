@@ -1,0 +1,15 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: hello-mondoo
+  namespace: hello-mondoo
+  labels:
+    app.kubernetes.io/name: hello-mondoo
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: hello-mondoo
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
