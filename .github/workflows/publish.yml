@@ -123,10 +123,25 @@ jobs:
           CERT_IDENTITY: ${{ github.server_url }}/${{ github.workflow_ref }}
         run: |
           cosign sign --yes "${IMAGE}@${DIGEST}"
-          cosign verify \
-            --certificate-identity "$CERT_IDENTITY" \
-            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
-            "${IMAGE}@${DIGEST}" > /dev/null
+
+          # Docker Hub lists new OCI referrers with a short delay, so a verify
+          # straight after signing can miss the signature. Retry with backoff.
+          for attempt in 1 2 3 4 5; do
+            if cosign verify \
+                --certificate-identity "$CERT_IDENTITY" \
+                --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+                "${IMAGE}@${DIGEST}" > /dev/null; then
+              echo "signature verified"
+              break
+            fi
+            if [ "$attempt" -eq 5 ]; then
+              echo "signature still not verifiable after ${attempt} attempts" >&2
+              exit 1
+            fi
+            echo "signature not visible yet, retrying in $((attempt * 10))s" >&2
+            sleep $((attempt * 10))
+          done
+
           {
             echo "### Image"
             echo '```'
