@@ -40,7 +40,16 @@ build: check-arch fetch ## Build the image for the local architecture
 run: build ## Build and run on localhost:$(PORT)
 	docker run --rm -p $(PORT):$(PORT) -e HTTP_PORT=$(PORT) $(IMAGE):$(TAG:v%=%)
 
+.PHONY: scan
+scan: build ## Check Dockerfile, image and k8s/ against the cnspec policy
+	docker tag $(IMAGE):$(TAG:v%=%) $(IMAGE):smoke
+	scripts/cnspec-scan.sh docker file Dockerfile
+	cid=$$(docker create $(IMAGE):smoke); \
+	  scripts/cnspec-scan.sh docker container $$cid; rc=$$?; \
+	  docker rm $$cid >/dev/null; exit $$rc
+	scripts/cnspec-scan.sh k8s k8s/ --discover clusters
+
 .PHONY: clean
 clean: ## Remove downloaded binaries and the local image
 	rm -rf $(DIST)
-	-docker image rm $(IMAGE):$(TAG:v%=%) 2>/dev/null
+	-docker image rm $(IMAGE):$(TAG:v%=%) $(IMAGE):smoke 2>/dev/null

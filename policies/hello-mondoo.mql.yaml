@@ -1,0 +1,209 @@
+# cnspec policy for the hello-mondoo container and its Kubernetes manifests.
+#
+# One bundle, three groups. Each group only applies to its own kind of asset,
+# so the same file is passed to every scan:
+#
+#   cnspec scan docker file Dockerfile          -f policies/hello-mondoo.mql.yaml
+#   cnspec scan docker container <container-id> -f policies/hello-mondoo.mql.yaml
+#   cnspec scan k8s k8s/ --discover clusters    -f policies/hello-mondoo.mql.yaml
+#
+# The container group runs against a created, never started container of the
+# image under test (tagged hello-mondoo:smoke). cnspec scans it from a docker
+# export snapshot, which reads the filesystem and can also query the Docker
+# engine for the image config (exposed ports, entrypoint, user). A plain image
+# scan can't see the config, and a running distroless container can't be
+# stat'ed because there is no shell.
+#
+# Impact 100 = required by the brief. Impact 70 = hardening. Both block:
+# scripts/cnspec-scan.sh fails on any failed, errored or skipped check.
+policies:
+  - uid: hello-mondoo
+    name: hello-mondoo container and deployment
+    version: "1.0.0"
+    tags:
+      mondoo.com/category: security
+      mondoo.com/platform: dockerfile,docker,k8s
+    authors:
+      - name: Daniel
+    require:
+      - provider: os
+      - provider: k8s
+    scoring_system: highest impact
+    groups:
+      - title: Dockerfile
+        filters: asset.platform == "dockerfile"
+        checks:
+          - uid: dockerfile-binary-location
+          - uid: dockerfile-exposes-port
+          - uid: dockerfile-non-root-user
+          - uid: dockerfile-base-pinned
+
+      - title: Container built from the image
+        filters: asset.kind == "container"
+        checks:
+          - uid: image-binary-location
+          - uid: image-exposes-port
+          - uid: image-entrypoint
+          - uid: image-non-root-user
+          - uid: image-binary-read-only
+
+      - title: Kubernetes manifests
+        filters: asset.platform == "k8s-manifest"
+        checks:
+          - uid: k8s-port-consistent
+          - uid: k8s-restricted-pod-security
+          - uid: k8s-namespace-enforces-restricted
+          - uid: k8s-image-pinned
+
+queries:
+  # Dockerfile (static, no build needed)
+
+  - uid: dockerfile-binary-location
+    title: Dockerfile installs and runs the binary at /usr/local/bin/hello-mondoo
+    impact: 100
+    mql: |
+      docker.file.finalStage.copy.any(dst == "/usr/local/bin/hello-mondoo")
+      && docker.file.finalStage.entrypoint.script.contains("/usr/local/bin/hello-mondoo")
+    docs:
+      desc: The final stage must copy the release binary to /usr/local/bin/hello-mondoo and use it as the entrypoint.
+      remediation: COPY the binary to /usr/local/bin/hello-mondoo and set ENTRYPOINT ["/usr/local/bin/hello-mondoo"].
+
+  - uid: dockerfile-exposes-port
+    title: Dockerfile exposes the web service port 8080/tcp
+    impact: 100
+    mql: docker.file.finalStage.expose.any(port == 8080 && protocol == "tcp")
+    docs:
+      desc: The app listens on 8080 unless HTTP_PORT says otherwise, so the image should declare it.
+      remediation: Add EXPOSE 8080 to the final stage.
+
+  - uid: dockerfile-non-root-user
+    title: Dockerfile switches to a non-root user
+    impact: 70
+    mql: docker.file.finalStage.runsAsRoot == false
+    docs:
+      desc: Containers should not run as root. A numeric UID lets Kubernetes enforce runAsNonRoot.
+      remediation: Add USER 65532:65532 (or another non-zero UID) to the final stage.
+
+  - uid: dockerfile-base-pinned
+    title: Dockerfile pins the base image by digest
+    impact: 70
+    mql: docker.file.finalStage.from.digest != ""
+    docs:
+      desc: Tags can be moved. A digest makes the build reproducible and lets Dependabot propose base image updates as reviewable PRs.
+      remediation: Use FROM image:tag@sha256:<digest>.
+
+  # Created container of the image under test. Filesystem checks read the
+  # exported snapshot; image config checks read the local Docker engine and
+  # look for the tag the smoke test builds.
+
+  - uid: image-binary-location
+    title: Image contains an executable binary at /usr/local/bin/hello-mondoo
+    impact: 100
+    mql: |
+      file("/usr/local/bin/hello-mondoo").exists
+      && file("/usr/local/bin/hello-mondoo").permissions.isFile
+      && file("/usr/local/bin/hello-mondoo").permissions.other_executable
+    docs:
+      desc: The binary must exist at the expected path and be executable by the non-root user the container runs as.
+      remediation: Check the COPY destination, the --chmod flag and .dockerignore.
+
+  - uid: image-exposes-port
+    title: Image config exposes 8080/tcp
+    impact: 100
+    mql: |
+      docker.images.one(
+        tags.any(_ == /(^|\/)hello-mondoo:smoke$/)
+        && exposedPorts.contains("8080/tcp")
+      )
+    docs:
+      desc: Reads ExposedPorts from the built image config, not from the Dockerfile, so it checks what was actually produced.
+      remediation: Add EXPOSE 8080 to the final stage of the Dockerfile.
+
+  - uid: image-entrypoint
+    title: Image entrypoint runs /usr/local/bin/hello-mondoo
+    impact: 70
+    mql: |
+      docker.images.one(
+        tags.any(_ == /(^|\/)hello-mondoo:smoke$/)
+        && entrypoint.length == 1
+        && entrypoint[0] == "/usr/local/bin/hello-mondoo"
+      )
+    docs:
+      desc: An exec-form entrypoint pointing at the binary, so the app is PID 1 and receives SIGTERM directly.
+      remediation: Use ENTRYPOINT ["/usr/local/bin/hello-mondoo"].
+
+  - uid: image-non-root-user
+    title: Image runs as a non-root user
+    impact: 70
+    mql: |
+      docker.images.one(
+        tags.any(_ == /(^|\/)hello-mondoo:smoke$/)
+        && runsAsRoot == false
+      )
+    docs:
+      desc: The image config must set a non-root user.
+      remediation: Add USER 65532:65532 to the Dockerfile.
+
+  - uid: image-binary-read-only
+    title: Binary is not writable inside the image
+    impact: 70
+    mql: |
+      file("/usr/local/bin/hello-mondoo").permissions.user_writeable == false
+      && file("/usr/local/bin/hello-mondoo").permissions.group_writeable == false
+      && file("/usr/local/bin/hello-mondoo").permissions.other_writeable == false
+    docs:
+      desc: Nothing in the container should be able to replace the binary.
+      remediation: COPY with --chmod=0555.
+
+  # Kubernetes manifests
+
+  - uid: k8s-port-consistent
+    title: Deployment listens on the port the image exposes
+    impact: 70
+    mql: |
+      k8s.deployments.one(
+        name == "hello-mondoo"
+        && containers.all(
+          ports.any(_["containerPort"] == 8080 && _["name"] == "http")
+          && env.any(_["name"] == "HTTP_PORT" && _["value"] == "8080")
+        )
+      )
+    docs:
+      desc: HTTP_PORT, containerPort and the image's EXPOSE must agree, otherwise probes and the Service point at the wrong port.
+      remediation: Keep HTTP_PORT and containerPort (named http) in sync in k8s/10-deployment.yaml.
+
+  - uid: k8s-restricted-pod-security
+    title: Deployment meets the restricted Pod Security Standard
+    impact: 70
+    mql: |
+      k8s.deployments.one(
+        name == "hello-mondoo"
+        && podSecurityStandard == "restricted"
+      )
+    docs:
+      desc: Checked before deploy, so a manifest change can't fail at admission time in the cluster.
+      remediation: Run as non-root, drop all capabilities, disallow privilege escalation and set seccompProfile RuntimeDefault.
+
+  - uid: k8s-namespace-enforces-restricted
+    title: Namespace enforces the restricted Pod Security Standard
+    impact: 70
+    mql: |
+      k8s.namespaces.one(
+        name == "hello-mondoo"
+        && labels["pod-security.kubernetes.io/enforce"] == "restricted"
+      )
+    docs:
+      desc: The cluster itself should reject pods that drift from the restricted standard.
+      remediation: Label the namespace pod-security.kubernetes.io/enforce=restricted.
+
+  - uid: k8s-image-pinned
+    title: Deployment pins the image by digest
+    impact: 70
+    mql: |
+      k8s.deployments.one(
+        name == "hello-mondoo"
+        && containerImages.all(_ == /@sha256:[a-f0-9]{64}$/)
+      )
+    docs:
+      desc: The publish workflow pins tag@digest. A plain tag here means the manifest was edited by hand.
+      remediation: Let the publish workflow bump the image, or use image:tag@sha256:<digest>.
