@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  KUBECONFORM_VERSION: v0.8.0
+  KUBECONFORM_SHA256: 9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883
+  # Matches the kind node image in smoke-test.yml
+  KUBERNETES_VERSION: 1.37.0
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: hadolint
+        uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
+        with:
+          dockerfile: Dockerfile
+
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
+      - name: Install kubeconform
+        run: |
+          curl -fsSL -o kubeconform.tgz \
+            "https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          echo "${KUBECONFORM_SHA256}  kubeconform.tgz" | sha256sum -c
+          tar -xzf kubeconform.tgz kubeconform
+
+      - name: kubeconform
+        run: ./kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" k8s/
+
+  manifest-tag:
+    name: Read deployed tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - id: tag
+        run: |
+          version=$(sed -nE 's#^\s*image: docker\.io/clickbg/hello-mondoo:([^@[:space:]]+).*#\1#p' k8s/10-deployment.yaml)
+          if [ -z "$version" ]; then
+            echo "could not read image tag from k8s/10-deployment.yaml" >&2
+            exit 1
+          fi
+          echo "Manifest deploys v${version}"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+
+  smoke-test:
+    name: Smoke test
+    needs: [lint, manifest-tag]
+    uses: ./.github/workflows/smoke-test.yml
+    with:
+      tag: ${{ needs.manifest-tag.outputs.tag }}

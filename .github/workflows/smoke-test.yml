@@ -1,0 +1,84 @@
+name: Smoke test
+
+# Builds the image for one app release and deploys k8s/ to a throwaway kind
+# cluster. Called by CI (with the tag currently in the manifest) and by Publish
+# (with the newly released tag, before anything is pushed).
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: App release tag, e.g. v1.2.3
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+env:
+  KIND_NODE_IMAGE: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  LOCAL_IMAGE: hello-mondoo:smoke
+
+jobs:
+  kind:
+    name: kind (${{ inputs.tag }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Fetch and verify release
+        env:
+          TAG: ${{ inputs.tag }}
+        run: bash scripts/fetch-release.sh "$TAG"
+
+      - name: Build image
+        run: docker buildx build --platform linux/amd64 --load -t "$LOCAL_IMAGE" .
+
+      - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
+        with:
+          cluster_name: smoke
+          node_image: ${{ env.KIND_NODE_IMAGE }}
+
+      - name: Load image into kind
+        run: kind load docker-image "$LOCAL_IMAGE" --name smoke
+
+      - name: Deploy
+        run: |
+          mkdir -p rendered
+          cp k8s/*.yaml rendered/
+          # Swap the registry image for the one we just built. Everything else
+          # in the manifest is applied exactly as committed.
+          sed -i -E "s#^(\s*image: ).*hello-mondoo.*#\1${LOCAL_IMAGE}#" rendered/10-deployment.yaml
+          grep -n 'image:' rendered/10-deployment.yaml
+          kubectl apply -f rendered/
+          kubectl -n hello-mondoo rollout status deployment/hello-mondoo --timeout=120s
+
+      - name: Check response
+        run: |
+          kubectl -n hello-mondoo port-forward svc/hello-mondoo 18080:80 >/dev/null 2>&1 &
+          pf=$!
+          trap 'kill "$pf"' EXIT
+          for _ in $(seq 1 20); do
+            if body=$(curl -fs http://127.0.0.1:18080/); then
+              echo "$body"
+              [ "$body" = "Hello from Mondoo Engineer!" ] && exit 0
+              echo "unexpected response" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "service did not respond" >&2
+          exit 1
+
+      - name: Debug info
+        if: failure()
+        run: |
+          kubectl -n hello-mondoo get all -o wide || true
+          kubectl -n hello-mondoo describe deployment,replicaset,pods || true
+          kubectl -n hello-mondoo get events --sort-by=.lastTimestamp || true
+          kubectl -n hello-mondoo logs -l app.kubernetes.io/name=hello-mondoo --tail=50 || true
