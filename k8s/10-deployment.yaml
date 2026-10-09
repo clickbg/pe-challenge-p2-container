@@ -31,7 +31,7 @@ spec:
       containers:
         - name: hello-mondoo
           # Updated by the publish workflow on every release.
-          image: docker.io/clickbg/hello-mondoo:0.1.0@sha256:276a463e151074e59474eab03ec5dc7f6f418273a8ee121cbbac2994c977d379
+          image: docker.io/clickbg/hello-mondoo:0.1.1@sha256:d913ebb107f22b4f36112eb4e834587f8a782a05840a4155061b08e60f99c803
           imagePullPolicy: IfNotPresent
           env:
             # Change together with containerPort below.
