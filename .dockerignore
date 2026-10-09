@@ -1,0 +1,3 @@
+# Allowlist: the build context only needs the verified Linux binaries.
+*
+!dist/hello-mondoo_linux_*
