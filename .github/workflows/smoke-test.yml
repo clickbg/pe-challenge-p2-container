@@ -1,8 +1,9 @@
 name: Smoke test
 
-# Builds the image for one app release and deploys k8s/ to a throwaway kind
-# cluster. Called by CI (with the tag currently in the manifest) and by Publish
-# (with the newly released tag, before anything is pushed).
+# Builds the image for one app release, checks it against the cnspec policy and
+# deploys k8s/ to a throwaway kind cluster. Called by CI (with the tag currently
+# in the manifest) and by Publish (with the newly released tag, before anything
+# is pushed), so an image that fails the policy never reaches the registry.
 
 on:
   workflow_call:
@@ -17,6 +18,7 @@ permissions:
 
 env:
   KIND_NODE_IMAGE: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+  # The image checks in policies/hello-mondoo.mql.yaml look for this tag.
   LOCAL_IMAGE: hello-mondoo:smoke
 
 jobs:
@@ -38,6 +40,31 @@ jobs:
 
       - name: Build image
         run: docker buildx build --platform linux/amd64 --load -t "$LOCAL_IMAGE" .
+
+      - uses: ./.github/actions/setup-cnspec
+
+      # Scan a created (never started) container instead of the image itself.
+      # cnspec scans it from a docker export snapshot, which can read both the
+      # filesystem and, through the Docker engine, the image config (exposed
+      # ports, entrypoint, user). A plain image scan can't see the config, and
+      # a running container can't be stat'ed because distroless has no shell.
+      - name: Scan image (cnspec)
+        env:
+          SARIF_OUT: cnspec-container.sarif
+        run: |
+          cid=$(docker create "$LOCAL_IMAGE")
+          trap 'docker rm "$cid" >/dev/null' EXIT
+          bash scripts/cnspec-scan.sh docker container "$cid"
+
+      # These findings have no file in the repo to point at, so they are kept
+      # as an artifact instead of going to code scanning.
+      - name: Keep container scan report
+        if: always() && hashFiles('cnspec-container.sarif') != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: cnspec-container-${{ inputs.tag }}
+          path: cnspec-container.sarif
+          retention-days: 30
 
       - uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa # v1.15.1
         with:

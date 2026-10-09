@@ -1,0 +1,26 @@
+name: Set up cnspec
+description: Install a pinned, checksum-verified cnspec and the providers the policy needs.
+
+runs:
+  using: composite
+  steps:
+    - name: Install cnspec
+      shell: bash
+      env:
+        CNSPEC_VERSION: 14.4.0
+        CNSPEC_SHA256: 6c2aeeed580d5c662ec5c0d82ba35e18db4f2e381181b7c54e09b1678fddece6
+        # Provider versions are separate from cnspec's. These are the versions
+        # shipped with cnspec 14.4.0; os 14.18.1 is the first with
+        # docker.image.exposedPorts.
+        OS_PROVIDER: os@14.18.1
+        K8S_PROVIDER: k8s@14.1.2
+      run: |
+        tmp=$(mktemp -d)
+        curl -fsSL -o "$tmp/cnspec.tgz" \
+          "https://github.com/mondoohq/cnspec/releases/download/v${CNSPEC_VERSION}/cnspec_${CNSPEC_VERSION}_linux_amd64.tar.gz"
+        echo "${CNSPEC_SHA256}  $tmp/cnspec.tgz" | sha256sum -c
+        tar -xzf "$tmp/cnspec.tgz" -C "$tmp" cnspec
+        sudo install -m 0755 "$tmp/cnspec" /usr/local/bin/cnspec
+        cnspec version
+        cnspec providers install "$OS_PROVIDER"
+        cnspec providers install "$K8S_PROVIDER"

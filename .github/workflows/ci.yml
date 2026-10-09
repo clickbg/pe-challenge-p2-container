@@ -46,6 +46,50 @@ jobs:
       - name: kubeconform
         run: ./kubeconform -strict -summary -kubernetes-version "$KUBERNETES_VERSION" k8s/
 
+  policy:
+    name: Policy (cnspec static)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: ./.github/actions/setup-cnspec
+
+      - name: Lint policy
+        run: cnspec policy lint policies/hello-mondoo.mql.yaml
+
+      - name: Scan Dockerfile
+        id: dockerfile
+        env:
+          SARIF_OUT: cnspec-dockerfile.sarif
+        run: bash scripts/cnspec-scan.sh docker file Dockerfile
+
+      - name: Scan k8s manifests
+        id: k8s
+        if: success() || steps.dockerfile.conclusion == 'failure'
+        env:
+          SARIF_OUT: cnspec-k8s.sarif
+        run: bash scripts/cnspec-scan.sh k8s k8s/ --discover clusters
+
+      - name: Upload Dockerfile findings
+        if: always() && hashFiles('cnspec-dockerfile.sarif') != ''
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: cnspec-dockerfile.sarif
+          category: cnspec-dockerfile
+
+      - name: Upload k8s findings
+        if: always() && hashFiles('cnspec-k8s.sarif') != ''
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: cnspec-k8s.sarif
+          category: cnspec-k8s
+
   manifest-tag:
     name: Read deployed tag
     runs-on: ubuntu-latest
@@ -69,7 +113,7 @@ jobs:
 
   smoke-test:
     name: Smoke test
-    needs: [lint, manifest-tag]
+    needs: [lint, policy, manifest-tag]
     uses: ./.github/workflows/smoke-test.yml
     with:
       tag: ${{ needs.manifest-tag.outputs.tag }}
