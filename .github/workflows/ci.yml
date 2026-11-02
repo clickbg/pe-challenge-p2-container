@@ -80,14 +80,14 @@ jobs:
 
       - name: Upload Dockerfile findings
         if: always() && hashFiles('cnspec-dockerfile.sarif') != ''
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: cnspec-dockerfile.sarif
           category: cnspec-dockerfile
 
       - name: Upload k8s findings
         if: always() && hashFiles('cnspec-k8s.sarif') != ''
-        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        uses: github/codeql-action/upload-sarif@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
         with:
           sarif_file: cnspec-k8s.sarif
           category: cnspec-k8s
